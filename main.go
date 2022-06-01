@@ -4,13 +4,12 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"text/template"
 
@@ -49,7 +48,7 @@ func showUsage() {
 		"portsRoot": portsRoot,
 	})
 	if err != nil {
-		errExit("error executing template %q: %s", usageTmpl.Name(), err)
+		panic(fmt.Sprintf("error executing template %q: %s", usageTmpl.Name(), err))
 	}
 }
 
@@ -65,9 +64,13 @@ func errExit(format string, v ...any) {
 }
 
 func main() {
+	if v, ok := os.LookupEnv("PORTSDIR"); ok && v != "" {
+		portsRoot = v
+	}
+
 	opts, err := getopt.New("R:qhV")
 	if err != nil {
-		panic("error creating options parser: " + err.Error())
+		panic(fmt.Sprintf("error creating options parser: %s", err))
 	}
 	progname = opts.ProgramName()
 
@@ -101,18 +104,25 @@ func main() {
 		}
 	}
 
+	origchan := make(chan string)
+	go processOrigins(origchan)
+
 	origins := opts.Args()
-	if len(origins) == 0 {
-		// allocate scanner buffer large enough to fit all origins listed in one line
-		buf := make([]byte, 0, 1024*1024)
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Buffer(buf, cap(buf))
-		for scanner.Scan() {
-			origins = append(origins, strings.Fields(scanner.Text())...)
+	if len(origins) > 0 {
+		// process origins given on the command line
+		for _, o := range origins {
+			origchan <- o
+		}
+	} else {
+		// no origins were given as arguments, read from stdin
+		sc := bufio.NewScanner(os.Stdin)
+		sc.Split(bufio.ScanWords)
+		for sc.Scan() {
+			origchan <- sc.Text()
 		}
 	}
 
-	processOrigins(origins)
+	close(origchan)
 }
 
 type result struct {
@@ -120,7 +130,7 @@ type result struct {
 	err    error
 }
 
-func processOrigins(origins []string) {
+func processOrigins(origchan chan string) {
 	reschan := make(chan result)
 	sem := make(chan int, runtime.NumCPU())
 
@@ -128,7 +138,7 @@ func processOrigins(origins []string) {
 		defer close(reschan)
 
 		var wg sync.WaitGroup
-		for _, origin := range origins {
+		for origin := range origchan {
 			sem <- 1
 			wg.Add(1)
 
@@ -164,7 +174,7 @@ func processPort(makefilePath string) error {
 	}
 	defer f.Close()
 
-	buf, err := ioutil.ReadAll(f)
+	buf, err := io.ReadAll(f)
 	if err != nil {
 		return err
 	}
@@ -207,10 +217,4 @@ func bumpPortrevision(buf []byte) ([]byte, error) {
 		buf = portversionRe.ReplaceAll(buf, []byte(rev1))
 	}
 	return buf, nil
-}
-
-func init() {
-	if v, ok := os.LookupEnv("PORTSDIR"); ok && v != "" {
-		portsRoot = v
-	}
 }
