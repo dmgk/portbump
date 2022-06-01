@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -174,12 +174,21 @@ func processPort(makefilePath string) error {
 	}
 	defer f.Close()
 
-	buf, err := io.ReadAll(f)
+	fi, err := f.Stat()
 	if err != nil {
 		return err
 	}
 
-	buf, err = bumpPortrevision(buf)
+	fbuf := bufGet()
+	defer bufPut(fbuf)
+
+	fbuf.Grow(int(fi.Size()) + bytes.MinRead)
+	_, err = fbuf.ReadFrom(f)
+	if err != nil {
+		return err
+	}
+
+	buf, err := bumpPortrevision(fbuf.Bytes())
 	if err != nil {
 		return err
 	}
@@ -217,4 +226,19 @@ func bumpPortrevision(buf []byte) ([]byte, error) {
 		buf = portversionRe.ReplaceAll(buf, []byte(rev1))
 	}
 	return buf, nil
+}
+
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
+func bufGet() *bytes.Buffer {
+	return bufPool.Get().(*bytes.Buffer)
+}
+
+func bufPut(b *bytes.Buffer) {
+	b.Reset()
+	bufPool.Put(b)
 }
