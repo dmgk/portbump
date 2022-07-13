@@ -18,21 +18,21 @@ import (
 )
 
 var usageTmpl = template.Must(template.New("usage").Parse(`
-Usage: {{.progname}} [-R path][-qhV] [category/port ...]
+usage: {{.progname}} [-hVq] [-R path] [origin ...]
 
 Bump port revisions.
 
 Options:
-  -R path        ports tree root (default: {{.portsRoot}})
-  -q             be quiet
   -h             print help and exit
   -V             print version and exit
+  -q             be quiet
+  -R path        ports tree root (default: {{.portsRoot}})
 
 Arguments:
   category/port  port origin(s) to bump PORTREVISION of
 
-  Alternatively, pipe a space separated category/port list
-  (e.g. from "portgrep -1" to the {{.progname}} standard input.
+  Alternatively, pipe a space separated origin list
+  (e.g. from "portgrep -1") to the {{.progname}} standard input.
 `[1:]))
 
 var (
@@ -68,7 +68,7 @@ func main() {
 		portsRoot = v
 	}
 
-	opts, err := getopt.New("R:qhV")
+	opts, err := getopt.New("hVqR:")
 	if err != nil {
 		panic(fmt.Sprintf("error creating options parser: %s", err))
 	}
@@ -81,6 +81,14 @@ func main() {
 		}
 
 		switch opt.Opt {
+		case 'h':
+			showUsage()
+			os.Exit(0)
+		case 'V':
+			showVersion()
+			os.Exit(0)
+		case 'q':
+			quiet = true
 		case 'R':
 			arg := opt.String()
 			if arg != "" {
@@ -91,38 +99,33 @@ func main() {
 			} else {
 				errExit("ports root cannot be blank")
 			}
-		case 'q':
-			quiet = true
-		case 'h':
-			showUsage()
-			os.Exit(0)
-		case 'V':
-			showVersion()
-			os.Exit(0)
 		default:
 			panic("unhandled option: -" + string(opt.Opt))
 		}
 	}
 
-	origchan := make(chan string)
-	go processOrigins(origchan)
+	origch := make(chan string)
+	donech := make(chan bool)
+
+	go processOrigins(origch, donech)
 
 	origins := opts.Args()
 	if len(origins) > 0 {
 		// process origins given on the command line
 		for _, o := range origins {
-			origchan <- o
+			origch <- o
 		}
 	} else {
 		// no origins were given as arguments, read from stdin
 		sc := bufio.NewScanner(os.Stdin)
 		sc.Split(bufio.ScanWords)
 		for sc.Scan() {
-			origchan <- sc.Text()
+			origch <- sc.Text()
 		}
 	}
 
-	close(origchan)
+	close(origch)
+	<-donech
 }
 
 type result struct {
@@ -130,33 +133,35 @@ type result struct {
 	err    error
 }
 
-func processOrigins(origchan chan string) {
-	reschan := make(chan result)
+func processOrigins(origch chan string, donech chan bool) {
+	defer close(donech)
+
+	resch := make(chan result)
 	sem := make(chan int, runtime.NumCPU())
 
 	go func() {
-		defer close(reschan)
+		defer close(resch)
 
 		var wg sync.WaitGroup
-		for origin := range origchan {
+		for o := range origch {
 			sem <- 1
 			wg.Add(1)
 
-			go func(origin string) {
+			go func(o string) {
 				defer func() {
 					<-sem
 					wg.Done()
 				}()
-				reschan <- result{
-					origin,
-					processPort(filepath.Join(portsRoot, origin, "Makefile")),
+				resch <- result{
+					o,
+					processPort(filepath.Join(portsRoot, o, "Makefile")),
 				}
-			}(origin)
+			}(o)
 		}
 		wg.Wait()
 	}()
 
-	for res := range reschan {
+	for res := range resch {
 		if res.err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %s: %s\n", progname, res.origin, res.err)
 			continue
